@@ -21,10 +21,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pylint>=3.3", "nbqa>=1.9"]
+dev = ["pytest>=8", "pylint>=3.3", "nbqa>=1.9", "pyright>=1.1.400", "pandas-stubs>=2.2"]
 
 [tool.setuptools]
 packages = ["stock_competition"]
+
+[tool.pyright]
+# Same checker and strictness as VS Code's Pylance extension in "standard" mode.
+typeCheckingMode = "standard"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

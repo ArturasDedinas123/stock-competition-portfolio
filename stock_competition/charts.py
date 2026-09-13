@@ -1,6 +1,7 @@
 """Shared chart style: a colorblind-safe palette, quiet axes and helpers for saving figures."""
 
 import matplotlib as mpl
+from matplotlib import rcsetup
 from matplotlib.colors import LinearSegmentedColormap
 
 from .paths import IMAGES_DIR
@@ -49,7 +50,7 @@ def set_chart_style() -> None:
         "ytick.labelcolor": INK["secondary"],
         "lines.linewidth": 1.5,
         "legend.frameon": False,
-        "axes.prop_cycle": mpl.cycler(color=list(COLORS.values())),
+        "axes.prop_cycle": rcsetup.cycler(color=list(COLORS.values())),
         "figure.dpi": 110,
     })
 

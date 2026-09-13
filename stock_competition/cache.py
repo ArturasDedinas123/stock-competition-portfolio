@@ -36,7 +36,10 @@ def cached_frame(name: str, key: str, compute: Callable[..., pd.DataFrame], *arg
     path = DATA_DIR / f"{name}_{key}.pkl"
     if path.exists():
         print(f"  loaded cached results ({path.name})")
-        return pd.read_pickle(path)
+        stored = pd.read_pickle(path)
+        if not isinstance(stored, pd.DataFrame):
+            raise TypeError(f"{path.name} does not contain a DataFrame")
+        return stored
     result = compute(*args, **kwargs)
     result.to_pickle(path)
     return result

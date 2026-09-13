@@ -28,5 +28,8 @@ jobs:
       - name: Lint the notebooks
         run: nbqa pylint notebooks
 
+      - name: Type-check the package and tests
+        run: pyright stock_competition tests
+
       - name: Test
         run: pytest

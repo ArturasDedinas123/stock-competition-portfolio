@@ -40,4 +40,4 @@ def trading_days(start, end) -> pd.DatetimeIndex:
     returns the portfolio experiences.
     """
     days = pd.date_range(start, end, freq=CustomBusinessDay(calendar=NYSEHolidayCalendar()))
-    return days[days > pd.Timestamp(start)]
+    return pd.DatetimeIndex(days[days > pd.Timestamp(start)])

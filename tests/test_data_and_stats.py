@@ -60,6 +60,6 @@ def test_stock_stats_and_betas(synthetic_prices):
     table = stats.stock_stats(synthetic_prices, OURS + [BENCHMARK], BENCHMARK, horizon=64)
     assert table.loc[BENCHMARK, "beta"] == pytest.approx(1.0)
     assert (table["max_drawdown"] <= 0).all()
-    assert table.loc["S9", "beta"] > table.loc["S0", "beta"]
+    assert table["beta"]["S9"] > table["beta"]["S0"]
     correlation = stats.average_correlation(synthetic_prices, OURS)
     assert correlation.between(-1, 1).all() and len(correlation) == len(OURS)

@@ -34,7 +34,7 @@ def drift_scenarios(prices: pd.DataFrame, cols, benchmark: str, settings: Strate
         ``(targets, details)``: ``targets`` has one column per view, ``details`` the inputs behind them.
     """
     cols = list(cols)
-    p = prices[cols]
+    p = prices.reindex(columns=cols)
     stocks = [c for c in cols if c != benchmark]
     beta = weekly_betas(p, cols, benchmark)
     capm = risk_free + beta * settings.equity_premium
@@ -46,7 +46,7 @@ def drift_scenarios(prices: pd.DataFrame, cols, benchmark: str, settings: Strate
     views = {"neutral": capm, "momentum": capm + settings.momentum_tilt * z_score}
     details = {"beta": beta, "momentum_12_1": momentum, "momentum_z": z_score}
     if analyst_targets is not None:
-        upside = analyst_targets.reindex(stocks) / p[stocks].iloc[-1] - 1
+        upside = analyst_targets.reindex(stocks) / p.reindex(columns=stocks).iloc[-1] - 1
         if upside.notna().mean() >= 0.5:
             tilt = (analyst_shrink * (upside - upside.median())).clip(-max_analyst_tilt, max_analyst_tilt)
             views["analyst"] = capm + tilt.reindex(cols).fillna(0.0)

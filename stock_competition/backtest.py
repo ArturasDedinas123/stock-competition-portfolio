@@ -22,13 +22,16 @@ class QuarterChoice(NamedTuple):
     max_sharpe: int
 
 
-def quarter_starts(dates: pd.DatetimeIndex, horizon: int, min_history: int, day: int = 14) -> list[int]:
+def quarter_starts(dates: pd.Index, horizon: int, min_history: int, day: int = 14) -> list[int]:
     """Positions of the first trading day on or after the ``day``-th of Mar, Jun, Sep and Dec.
 
     Only dates with ``min_history`` days before them and a full horizon after them are kept.
     """
-    candidates = [dates.searchsorted(pd.Timestamp(year, month, day))
-                  for year in range(dates[0].year, dates[-1].year + 1) for month in (3, 6, 9, 12)]
+    dates = pd.DatetimeIndex(dates)
+    first_year = int(pd.Timestamp(dates.to_numpy()[0]).year)
+    last_year = int(pd.Timestamp(dates.to_numpy()[-1]).year)
+    candidates = [int(dates.searchsorted(np.datetime64(f"{year}-{month:02d}-{day:02d}")))
+                  for year in range(first_year, last_year + 1) for month in (3, 6, 9, 12)]
     return [i for i in candidates if i >= min_history and i + horizon < len(dates)]
 
 
@@ -56,11 +59,12 @@ def _choose_portfolios(train: pd.DataFrame, n_ours: int, n_pool: int, benchmark:
     return QuarterChoice(int(np.argmax(p_win)), float(p_win.max()), int(np.argmax((means[:, 0] - rf_horizon) / stds)))
 
 
-def _risk_free_rate(irx: pd.Series | None, date: pd.Timestamp, fallback: float) -> float:
-    """Annual 13-week T-bill yield on ``date`` (the latest value before it), or ``fallback``."""
-    if irx is None or irx.empty or np.isnan(irx.asof(date)):
+def _risk_free_rate(irx: pd.Series | None, date, fallback: float) -> float:
+    """Annual 13-week T-bill yield on ``date`` (the latest value up to it), or ``fallback``."""
+    if irx is None:
         return fallback
-    return float(irx.asof(date)) / 100
+    known = irx.loc[:date].dropna()
+    return fallback if known.empty else float(known.iloc[-1]) / 100
 
 
 def walk_forward(prices: pd.DataFrame, ours, rivals_only, benchmark: str, irx: pd.Series | None,

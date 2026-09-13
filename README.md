@@ -135,9 +135,10 @@ docs/images/                Charts used in this README
 
 ```bash
 pip install -e ".[dev]"
-pytest                          # 31 tests, a few seconds
+pytest                          # 32 tests, a few seconds
 pylint stock_competition tests
 nbqa pylint notebooks
+pyright stock_competition tests # type checks, same engine as VS Code's Pylance
 ```
 
 GitHub Actions runs the same checks on every push, on Python 3.12 and 3.14.

@@ -28,14 +28,28 @@ def _uniform_simplex(shape, rng: np.random.Generator) -> np.ndarray:
     return draws / draws.sum(axis=-1, keepdims=True)
 
 
-def rival_field(pool_returns: np.ndarray, n_rivals: int, seed: int, n_stocks: int = 10,
-                min_w: float = 0.05, max_w: float = 0.20, chunk: int = 5_000, return_all: bool = False,
-                workers: int | None = None):
-    """Best and 3rd-best rival return in every simulation.
+def _chunk_returns(pool_returns: np.ndarray, index: int, chunk: int, n_rivals: int, seed: int, n_stocks: int,
+                   min_w: float, max_w: float) -> np.ndarray:
+    """Returns of every rival in simulations ``[index * chunk, (index + 1) * chunk)``."""
+    n_sims, pool_size = pool_returns.shape
+    if pool_size < n_stocks:
+        raise ValueError(f"The pool has {pool_size} stocks; rivals need {n_stocks}.")
+    start, stop = index * chunk, min(n_sims, (index + 1) * chunk)
+    rng = np.random.default_rng([seed, index])
+    keys = rng.random((stop - start, n_rivals, pool_size), dtype=np.float32)
+    picks = np.argpartition(keys, n_stocks - 1, axis=2)[..., :n_stocks]
+    weights = random_bounded_weights((stop - start, n_rivals, n_stocks), rng, min_w, max_w)
+    rows = np.arange(stop - start)[:, None, None]
+    return (pool_returns[start:stop][rows, picks] * weights).sum(axis=2)
+
+
+def rival_returns(pool_returns: np.ndarray, n_rivals: int, seed: int, n_stocks: int = 10, min_w: float = 0.05,
+                  max_w: float = 0.20, chunk: int = 5_000, workers: int | None = None) -> np.ndarray:
+    """Every rival's return in every simulation, shape (n_sims, n_rivals).
 
     Each simulation gets ``n_rivals`` fresh rivals; each rival holds ``n_stocks`` distinct random
-    stocks from the pool with random weights. Rivals depend only on ``seed`` and the chunk layout,
-    so every view (and every thread count) sees exactly the same rivals.
+    stocks from the pool with random weights. Rivals depend only on ``seed`` and ``chunk``, so every
+    view and every thread count sees exactly the same rivals.
 
     Args:
         pool_returns: Simulated returns of the stocks rivals can pick, shape (n_sims, pool_size).
@@ -45,32 +59,35 @@ def rival_field(pool_returns: np.ndarray, n_rivals: int, seed: int, n_stocks: in
         min_w: Minimum weight per stock.
         max_w: Maximum weight per stock.
         chunk: Simulations per thread task.
-        return_all: Also return every rival's return, shape (n_sims, n_rivals).
         workers: Worker threads (default: one per CPU core).
-
-    Returns:
-        ``(best, third)`` or ``(best, third, every)``.
     """
-    n_sims, pool_size = pool_returns.shape
-    if pool_size < n_stocks:
-        raise ValueError(f"The pool has {pool_size} stocks; rivals need {n_stocks}.")
+    every = np.empty((len(pool_returns), n_rivals), np.float32)
+
+    def work(index: int) -> None:
+        returns = _chunk_returns(pool_returns, index, chunk, n_rivals, seed, n_stocks, min_w, max_w)
+        every[index * chunk: index * chunk + len(returns)] = returns
+
+    run_parallel(work, range(math.ceil(len(pool_returns) / chunk)), workers)
+    return every
+
+
+def rival_field(pool_returns: np.ndarray, n_rivals: int, seed: int, n_stocks: int = 10, min_w: float = 0.05,
+                max_w: float = 0.20, chunk: int = 5_000, workers: int | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Best and 3rd-best rival return in every simulation.
+
+    Uses the same rivals as :func:`rival_returns` with the same arguments, without storing every
+    rival's return. Returns ``(best, third)``, each of shape (n_sims,).
+    """
+    n_sims = len(pool_returns)
     best = np.empty(n_sims, np.float32)
     third = np.empty(n_sims, np.float32)
-    every = np.empty((n_sims, n_rivals), np.float32) if return_all else None
     k = min(2, n_rivals - 1)
 
     def work(index: int) -> None:
-        start, stop = index * chunk, min(n_sims, (index + 1) * chunk)
-        rng = np.random.default_rng([seed, index])
-        keys = rng.random((stop - start, n_rivals, pool_size), dtype=np.float32)
-        picks = np.argpartition(keys, n_stocks - 1, axis=2)[..., :n_stocks]
-        weights = random_bounded_weights((stop - start, n_rivals, n_stocks), rng, min_w, max_w)
-        rows = np.arange(stop - start)[:, None, None]
-        returns = (pool_returns[start:stop][rows, picks] * weights).sum(axis=2)
-        best[start:stop] = returns.max(axis=1)
-        third[start:stop] = -np.partition(-returns, k, axis=1)[:, k]
-        if every is not None:
-            every[start:stop] = returns
+        returns = _chunk_returns(pool_returns, index, chunk, n_rivals, seed, n_stocks, min_w, max_w)
+        start = index * chunk
+        best[start:start + len(returns)] = returns.max(axis=1)
+        third[start:start + len(returns)] = -np.partition(-returns, k, axis=1)[:, k]
 
     run_parallel(work, range(math.ceil(n_sims / chunk)), workers)
-    return (best, third, every) if return_all else (best, third)
+    return best, third

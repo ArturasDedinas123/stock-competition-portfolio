@@ -20,12 +20,13 @@ def _today() -> str:
 
 def _download_closes(tickers: list[str]) -> pd.DataFrame:
     raw = yf.download(tickers, period="max", auto_adjust=True, progress=False, threads=True)
+    if raw is None:
+        raise RuntimeError(f"Yahoo Finance returned no data for {tickers}")
     closes = raw["Close"]
     if isinstance(closes, pd.Series):
         closes = closes.to_frame(tickers[0])
     closes = closes.reindex(columns=tickers)
-    if closes.index.tz is not None:
-        closes.index = closes.index.tz_localize(None)
+    closes.index = pd.DatetimeIndex(closes.index).tz_localize(None)
     return closes.sort_index()
 
 
@@ -49,7 +50,7 @@ def load_prices(tickers, refresh: bool = False) -> pd.DataFrame:
         else:
             cached = fresh
         cached.to_csv(path)
-    return cached[tickers].dropna(how="all")
+    return cached.reindex(columns=tickers).dropna(how="all")
 
 
 def _fetch_target_price(ticker: str) -> float | None:
@@ -66,7 +67,7 @@ def load_analyst_targets(tickers, refresh: bool = False) -> pd.Series:
     path = DATA_DIR / f"analyst_targets_{_today()}.csv"
     if path.exists() and not refresh:
         cached = pd.read_csv(path, index_col=0)["target_mean_price"]
-        if set(tickers) <= set(cached.index):
+        if isinstance(cached, pd.Series) and set(tickers) <= set(cached.index):
             return cached.reindex(tickers)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -104,9 +105,13 @@ def next_earnings(tickers, start, end) -> pd.DataFrame:
 def shared_window_start(prices: pd.DataFrame, tickers, skip_days: int = 20, history_start="max") -> pd.Timestamp:
     """First date on which every ticker has traded for at least ``skip_days`` days."""
     newest_listing = prices[tickers].apply(pd.Series.first_valid_index).max()
-    start = prices.index[prices.index.get_loc(newest_listing) + skip_days]
-    if history_start != "max":
-        start = max(start, pd.Timestamp(history_start))
+    position = int(prices.index.searchsorted(newest_listing)) + skip_days
+    start = pd.Timestamp(prices.index.to_numpy()[position])
+    if not isinstance(start, pd.Timestamp):
+        raise ValueError("The price index must contain dates")
+    limit = pd.Timestamp(history_start) if history_start != "max" else None
+    if isinstance(limit, pd.Timestamp) and limit > start:
+        start = limit
     return start
 
 

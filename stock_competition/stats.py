@@ -6,29 +6,35 @@ import pandas as pd
 TRADING_DAYS_PER_YEAR = 252
 
 
+def log_returns(prices: pd.DataFrame, periods: int = 1) -> pd.DataFrame:
+    """Log returns over ``periods`` rows (the first ``periods`` rows are NaN)."""
+    return pd.DataFrame(np.log(prices.to_numpy()), index=prices.index, columns=prices.columns).diff(periods)
+
+
 def weekly_betas(prices: pd.DataFrame, tickers, benchmark: str) -> pd.Series:
     """Beta to the benchmark from weekly log returns (weekly data avoids end-of-day timing noise)."""
     tickers = list(tickers)
     cols = list(dict.fromkeys(tickers + [benchmark]))
-    weekly = np.log(prices[cols].resample("W-FRI").last()).diff().dropna()
-    variance = weekly[benchmark].var()
-    return weekly[tickers].apply(lambda s: s.cov(weekly[benchmark]) / variance)
+    weekly = log_returns(prices.reindex(columns=cols).resample("W-FRI").last()).dropna().to_numpy()
+    market = weekly[:, cols.index(benchmark)]
+    variance = market.var(ddof=1)
+    return pd.Series({t: np.cov(weekly[:, cols.index(t)], market)[0, 1] / variance for t in tickers})
 
 
 def average_correlation(prices: pd.DataFrame, tickers) -> pd.Series:
     """Each stock's average correlation of daily returns with the other stocks in ``tickers``."""
-    corr = np.log(prices[list(tickers)]).diff().dropna().corr()
+    corr = log_returns(prices.reindex(columns=list(tickers))).dropna().corr()
     return (corr.sum() - 1) / (len(corr) - 1)
 
 
 def stock_stats(prices: pd.DataFrame, tickers, benchmark: str, horizon: int) -> pd.DataFrame:
     """Annual return and volatility, beta, worst drawdown, momentum and historical horizon-return range."""
-    p = prices[list(tickers)]
+    p = prices.reindex(columns=list(tickers))
     years = (len(p) - 1) / TRADING_DAYS_PER_YEAR
     horizon_returns = (p.shift(-horizon) / p - 1).dropna()
     return pd.DataFrame({
         "annual_return": (p.iloc[-1] / p.iloc[0]) ** (1 / years) - 1,
-        "annual_vol": np.log(p).diff().std() * np.sqrt(TRADING_DAYS_PER_YEAR),
+        "annual_vol": log_returns(p).std() * np.sqrt(TRADING_DAYS_PER_YEAR),
         "beta": weekly_betas(prices, tickers, benchmark),
         "max_drawdown": (p / p.cummax() - 1).min(),
         "momentum_12_1": p.iloc[-22] / p.iloc[-253] - 1,
