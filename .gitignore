@@ -1,0 +1,20 @@
+# Downloaded prices and cached search results (rebuilt automatically)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Tools
+.pytest_cache/
+
+# macOS
+.DS_Store

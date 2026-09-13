@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stock-competition"
+version = "1.0.0"
+description = "Simulation-based portfolio for a winner-take-all student stock competition"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Arturas Dedinas" }]
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "matplotlib>=3.8",
+    "yfinance>=0.2.50",
+    "jupyterlab>=4.0",
+    "ipykernel>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pylint>=3.3", "nbqa>=1.9"]
+
+[tool.setuptools]
+packages = ["stock_competition"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.pylint.format]
+max-line-length = 120
+
+[tool.pylint.design]
+# Numerical functions naturally take several arrays plus model settings.
+max-args = 12
+max-positional-arguments = 12
+max-locals = 25
+max-attributes = 12
+
+[tool.pylint.basic]
+good-names = ["i", "j", "k", "n", "p", "w", "t0", "i0", "ax", "df"]
+no-docstring-rgx = "^(_|test_|fixture_)"
+
+[tool.nbqa.addopts]
+# Notebooks are read top to bottom: allow imports after the first markdown cell and top-level names in any case.
+pylint = [
+    "--disable=missing-module-docstring,wrong-import-position,invalid-name,pointless-statement,expression-not-assigned",
+]
