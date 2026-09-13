@@ -9,6 +9,7 @@ class StrategySettings:
 
     Attributes:
         horizon: Trading days between the purchase close and the final close.
+        portfolio_size: Stocks in every portfolio (ours and each rival's).
         min_weight: Smallest allowed weight per stock.
         max_weight: Largest allowed weight per stock.
         n_rivals: Number of rival portfolios in the competition.
@@ -20,6 +21,7 @@ class StrategySettings:
     """
 
     horizon: int
+    portfolio_size: int = 10
     min_weight: float = 0.05
     max_weight: float = 0.20
     n_rivals: int = 20

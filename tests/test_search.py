@@ -52,14 +52,17 @@ def test_threaded_scoring_matches_a_direct_calculation(small_problem):
     assert all(np.array_equal(counts[k], single[k]) for k in ("win", "top3", "loss"))
 
 
-def test_evaluate_weights_and_win_rates_agree_with_scoring(small_problem):
+def test_outcome_rates_and_win_rates_agree_with_scoring(small_problem):
     units, returns, best, third = small_problem
     weights = search.weights_from_units(units, 0.05, 0.05)
     counts = search.score_portfolios(units, 0.05, 0.05, returns, best, third, verbose=False)
-    table = search.evaluate_weights(weights, returns, best, third)
-    assert np.allclose(table["p_win"], counts["win"] / len(returns))
-    assert np.allclose(table["p_top3"], counts["top3"] / len(returns))
-    assert np.allclose(search.win_rates(weights, returns, best), table["p_win"])
+    rates = search.outcome_rates(weights, returns, best, third)
+    assert np.allclose(rates["p_win"], counts["win"] / len(returns))
+    assert np.allclose(rates["p_top3"], counts["top3"] / len(returns))
+    assert np.allclose(rates["p_loss"], counts["loss"] / len(returns))
+    assert np.allclose(rates["mean"], (weights @ returns.T).mean(axis=1), atol=1e-6)
+    assert "p_top3" not in search.outcome_rates(weights, returns, best)
+    assert np.allclose(search.win_rates(weights, returns, best), rates["p_win"])
 
 
 def test_refine_weights_climbs_to_the_best_portfolio():

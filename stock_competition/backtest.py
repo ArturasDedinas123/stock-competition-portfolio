@@ -5,13 +5,14 @@ from typing import NamedTuple
 import numpy as np
 import pandas as pd
 
-from .rivals import rival_field
-from .scenarios import apply_view, bootstrap_log_returns, drift_scenarios
+from .rivals import simulate_field
+from .scenarios import drift_scenarios
 from .search import enumerate_grid, holdings_label, portfolio_moments, score_portfolios, weights_from_units
 from .settings import StrategySettings
-from .stats import TRADING_DAYS_PER_YEAR
+from .simulation import simulate
+from .stats import TRADING_DAYS_PER_YEAR, log_returns
 
-BACKTEST_VIEWS = ("neutral", "momentum")  # past analyst targets aren't available
+BACKTEST_VIEWS = {"neutral": 1.0, "momentum": 1.0}  # past analyst targets aren't available
 
 
 class QuarterChoice(NamedTuple):
@@ -35,24 +36,17 @@ def quarter_starts(dates: pd.Index, horizon: int, min_history: int, day: int = 1
     return [i for i in candidates if i >= min_history and i + horizon < len(dates)]
 
 
-def _choose_portfolios(train: pd.DataFrame, n_ours: int, n_pool: int, benchmark: str, risk_free: float,
+def _choose_portfolios(train: pd.DataFrame, ours: list[str], pool: list[str], benchmark: str, risk_free: float,
                        settings: StrategySettings, units: np.ndarray, grid_step: float, n_sims: int,
                        seed: int) -> QuarterChoice:
     """The P(win) pick and the max-Sharpe portfolio for one quarter, using only the ``train`` prices."""
     targets, _ = drift_scenarios(train, train.columns, benchmark, settings, risk_free)
-    log_returns = np.diff(np.log(train.to_numpy()), axis=0)
-    totals, expected = bootstrap_log_returns(log_returns, settings.horizon, n_sims, settings.block_days,
-                                             np.random.default_rng(seed), settings.half_life_days)
-    p_win = np.zeros(len(units))
-    ours_by_view = {}
-    for view in BACKTEST_VIEWS:
-        returns = apply_view(totals, expected, targets[view].to_numpy())
-        best, _ = rival_field(returns[:, :n_pool], settings.n_rivals, seed, n_ours,
-                              settings.min_weight, settings.max_weight)
-        ours_by_view[view] = np.ascontiguousarray(returns[:, :n_ours])
-        wins = score_portfolios(units, settings.min_weight, grid_step, ours_by_view[view], best, verbose=False)["win"]
-        p_win += wins / n_sims / len(BACKTEST_VIEWS)
-    neutral = ours_by_view["neutral"]
+    scenarios = simulate(log_returns(train).iloc[1:], targets, settings, n_sims=n_sims, seed=seed, keep=ours,
+                         pool=pool, view_weights=BACKTEST_VIEWS)
+    p_win = scenarios.average({v: score_portfolios(units, settings.min_weight, grid_step, scenarios.returns[v],
+                                                   scenarios.fields[v].best, verbose=False)["win"] / n_sims
+                               for v in scenarios.views})
+    neutral = scenarios.returns["neutral"]
     means, stds = portfolio_moments(units, settings.min_weight, grid_step,
                                     neutral.mean(axis=0, dtype=np.float64), np.cov(neutral, rowvar=False))
     rf_horizon = (1 + risk_free) ** (settings.horizon / TRADING_DAYS_PER_YEAR) - 1
@@ -92,24 +86,23 @@ def walk_forward(prices: pd.DataFrame, ours, rivals_only, benchmark: str, irx: p
         min_history: Trading days of history required before the first quarter.
         verbose: Print one line per quarter.
     """
-    ours, rivals_only = list(ours), list(rivals_only)
-    p = prices[ours + rivals_only + [benchmark]]
-    n_ours, n_pool = len(ours), len(ours) + len(rivals_only)
-    units = enumerate_grid(n_ours, settings.min_weight, settings.max_weight, grid_step)
+    ours, pool = list(ours), list(ours) + list(rivals_only)
+    p = prices[pool + [benchmark]]
+    units = enumerate_grid(len(ours), settings.min_weight, settings.max_weight, grid_step)
     grid_weights = weights_from_units(units, settings.min_weight, grid_step)
     equal = int(np.flatnonzero((units == units[:, :1]).all(axis=1))[0])  # the only row with identical weights
 
     rows = []
     for number, i0 in enumerate(quarter_starts(p.index, settings.horizon, min_history)):
         t0 = p.index[i0]
-        choice = _choose_portfolios(p.iloc[: i0 + 1], n_ours, n_pool, benchmark,
+        choice = _choose_portfolios(p.iloc[: i0 + 1], ours, pool, benchmark,
                                     _risk_free_rate(irx, t0, settings.risk_free_fallback),
                                     settings, units, grid_step, n_sims, seed + number)
+        realized = (p.iloc[i0 + settings.horizon].to_numpy() / p.iloc[i0].to_numpy() - 1).astype(np.float32)
         row = {"start": t0, "end": p.index[i0 + settings.horizon],
                "pick": holdings_label(grid_weights[choice.pick], ours, settings.min_weight),
                "predicted_p_win": choice.predicted_p_win}
-        row |= _score_outcome((p.iloc[i0 + settings.horizon].to_numpy() / p.iloc[i0].to_numpy() - 1).astype(np.float32),
-                              n_ours, n_pool, grid_weights,
+        row |= _score_outcome(realized, len(pool), grid_weights @ realized[:len(ours)],
                               {"pick": choice.pick, "equal_weight": equal, "max_sharpe": choice.max_sharpe},
                               settings, n_field_draws, seed + 10_000 + number)
         rows.append(row)
@@ -119,12 +112,13 @@ def walk_forward(prices: pd.DataFrame, ours, rivals_only, benchmark: str, irx: p
     return pd.DataFrame(rows).set_index("start")
 
 
-def _score_outcome(realized: np.ndarray, n_ours: int, n_pool: int, grid_weights: np.ndarray,
-                   positions: dict[str, int], settings: StrategySettings, n_field_draws: int, seed: int) -> dict:
+def _score_outcome(realized: np.ndarray, n_pool: int, grid_realized: np.ndarray, positions: dict[str, int],
+                   settings: StrategySettings, n_field_draws: int, seed: int) -> dict:
     """Actual returns, the pick's percentile among all grid portfolios, and win rates against random fields."""
-    grid_realized = grid_weights @ realized[:n_ours]
     field = np.broadcast_to(realized[:n_pool], (n_field_draws, n_pool))
-    field_best, _ = rival_field(field, settings.n_rivals, seed, n_ours, settings.min_weight, settings.max_weight)
+    fields, _ = simulate_field({"actual": field}, settings.n_rivals, seed, settings.portfolio_size,
+                               settings.min_weight, settings.max_weight)
+    field_best = fields["actual"].best
     returns = {name: grid_realized[position] for name, position in positions.items()} | {"spy": realized[-1]}
     row = {f"{name}_return": float(value) for name, value in returns.items()}
     row["pick_percentile"] = float((grid_realized <= returns["pick"]).mean())

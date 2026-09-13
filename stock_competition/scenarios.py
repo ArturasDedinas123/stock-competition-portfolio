@@ -107,13 +107,3 @@ def apply_view(totals: np.ndarray, expected: np.ndarray, target: np.ndarray | No
     out += (np.log1p(np.asarray(target, dtype=np.float64)) - np.log(gross_mean)).astype(np.float32)
     np.expm1(out, out=out)
     return out
-
-
-def make_scenarios(totals: np.ndarray, expected: np.ndarray, targets: pd.DataFrame, cols,
-                   include_trend: bool = True) -> dict[str, np.ndarray]:
-    """Simple horizon returns for every view in ``targets`` (plus "trend"), columns ordered as ``cols``."""
-    scenarios = {view: apply_view(totals, expected, targets[view].reindex(cols).to_numpy())
-                 for view in targets.columns}
-    if include_trend:
-        scenarios["trend"] = apply_view(totals, expected)
-    return scenarios

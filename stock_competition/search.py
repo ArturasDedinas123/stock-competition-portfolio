@@ -1,9 +1,8 @@
-"""Exhaustive grid search over portfolio weights, fine-tuning, and portfolio evaluation."""
+"""Portfolio weight grids, fast outcome counting and fine-tuning."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import numpy as np
-import pandas as pd
 
 from .parallel import run_parallel
 
@@ -47,8 +46,33 @@ def holdings_label(weights, tickers, min_w: float) -> str:
     return " · ".join(parts) if parts else "all at the minimum"
 
 
-def _rows_per_task(n_sims: int) -> int:
-    return max(1, CELLS_PER_TASK // max(1, n_sims))
+def _count_outcomes(rows_for: Callable[[int, int], np.ndarray], n_rows: int, returns: np.ndarray, best: np.ndarray,
+                    third: np.ndarray | None, outcomes: Sequence[str], dtype, workers: int | None,
+                    label: str | None) -> dict[str, np.ndarray]:
+    """Per portfolio, count simulations that win, reach the top 3 or lose money, and sum the returns.
+
+    ``rows_for(start, stop)`` returns the weights of portfolios ``start..stop``. Work is split into
+    thread tasks of about ``CELLS_PER_TASK`` portfolio-simulation cells.
+    """
+    n_sims = len(returns)
+    returns_t = np.ascontiguousarray(returns.T, dtype=np.float32)
+    out = {name: np.empty(n_rows, np.float64 if name == "sum" else dtype) for name in outcomes}
+    rows_per_task = max(1, CELLS_PER_TASK // max(1, n_sims))
+
+    def work(start: int) -> None:
+        stop = min(n_rows, start + rows_per_task)
+        port = rows_for(start, stop) @ returns_t
+        if "win" in out:
+            out["win"][start:stop] = np.count_nonzero(port > best, axis=1)
+        if "top3" in out and third is not None:
+            out["top3"][start:stop] = np.count_nonzero(port > third, axis=1)
+        if "loss" in out:
+            out["loss"][start:stop] = np.count_nonzero(port < 0, axis=1)
+        if "sum" in out:
+            out["sum"][start:stop] = port.sum(axis=1, dtype=np.float64)
+
+    run_parallel(work, range(0, n_rows, rows_per_task), workers, label=label)
+    return out
 
 
 def score_portfolios(units: np.ndarray, min_w: float, step: float, returns: np.ndarray, best: np.ndarray,
@@ -60,70 +84,44 @@ def score_portfolios(units: np.ndarray, min_w: float, step: float, returns: np.n
         units: Grid rows from :func:`enumerate_grid`.
         min_w: Minimum weight used to build the grid.
         step: Grid step used to build the grid.
-        returns: Simulated returns of our stocks, shape (n_sims, n_stocks).
+        returns: Simulated returns of the grid's stocks, shape (n_sims, n_stocks).
         best: Best rival return per simulation.
         third: 3rd-best rival return per simulation (optional).
         workers: Worker threads (default: one per CPU core).
         verbose: Print progress.
 
     Returns:
-        Dict of count arrays ``win``, ``loss`` (and ``top3``), plus ``n_sims``.
+        Compact count arrays ``win``, ``loss`` (and ``top3``), plus ``n_sims``.
     """
     n_sims = len(returns)
-    dtype = np.uint16 if n_sims < 2**16 else np.uint32
-    returns_t = np.ascontiguousarray(returns.T, dtype=np.float32)
-    counts = {"win": np.empty(len(units), dtype), "loss": np.empty(len(units), dtype)}
-    if third is not None:
-        counts["top3"] = np.empty(len(units), dtype)
-    rows = _rows_per_task(n_sims)
-
-    def work(start: int) -> None:
-        stop = min(len(units), start + rows)
-        port = weights_from_units(units[start:stop], min_w, step) @ returns_t
-        counts["win"][start:stop] = np.count_nonzero(port > best, axis=1)
-        counts["loss"][start:stop] = np.count_nonzero(port < 0, axis=1)
-        if third is not None:
-            counts["top3"][start:stop] = np.count_nonzero(port > third, axis=1)
-
-    run_parallel(work, range(0, len(units), rows), workers, label=f"{len(units):,} portfolios" if verbose else None)
+    outcomes = ("win", "loss", "top3") if third is not None else ("win", "loss")
+    counts = _count_outcomes(lambda start, stop: weights_from_units(units[start:stop], min_w, step), len(units),
+                             returns, best, third, outcomes, np.uint16 if n_sims < 2**16 else np.uint32, workers,
+                             f"{len(units):,} portfolios" if verbose else None)
     counts["n_sims"] = np.array(n_sims)
     return counts
 
 
-def evaluate_weights(weights: np.ndarray, returns: np.ndarray, best: np.ndarray, third: np.ndarray,
-                     workers: int | None = None) -> pd.DataFrame:
-    """P(win), P(top 3), P(loss) and mean return for each row of ``weights``."""
+def outcome_rates(weights: np.ndarray, returns: np.ndarray, best: np.ndarray, third: np.ndarray | None = None,
+                  workers: int | None = None) -> dict[str, np.ndarray]:
+    """P(win), P(top 3) (when ``third`` is given), P(loss) and mean return for each row of ``weights``."""
     weights = np.ascontiguousarray(weights, dtype=np.float32)
-    returns_t = np.ascontiguousarray(returns.T, dtype=np.float32)
-    n_sims = len(returns)
-    out = np.empty((len(weights), 4))
-    rows = _rows_per_task(n_sims)
-
-    def work(start: int) -> None:
-        stop = min(len(weights), start + rows)
-        port = weights[start:stop] @ returns_t
-        out[start:stop, 0] = np.count_nonzero(port > best, axis=1) / n_sims
-        out[start:stop, 1] = np.count_nonzero(port > third, axis=1) / n_sims
-        out[start:stop, 2] = np.count_nonzero(port < 0, axis=1) / n_sims
-        out[start:stop, 3] = port.mean(axis=1, dtype=np.float64)
-
-    run_parallel(work, range(0, len(weights), rows), workers)
-    return pd.DataFrame(out, columns=["p_win", "p_top3", "p_loss", "mean"])
+    outcomes = ("win", "loss", "sum", "top3") if third is not None else ("win", "loss", "sum")
+    counts = _count_outcomes(lambda start, stop: weights[start:stop], len(weights), returns, best, third,
+                             outcomes, np.int64, workers, None)
+    rates = {"p_win": counts["win"] / len(returns), "p_loss": counts["loss"] / len(returns),
+             "mean": counts["sum"] / len(returns)}
+    if third is not None:
+        rates["p_top3"] = counts["top3"] / len(returns)
+    return rates
 
 
 def win_rates(weights: np.ndarray, returns: np.ndarray, best: np.ndarray, workers: int | None = None) -> np.ndarray:
     """P(win) for each row of ``weights``: the share of simulations where it beats the best rival."""
     weights = np.ascontiguousarray(weights, dtype=np.float32)
-    returns_t = np.ascontiguousarray(returns.T, dtype=np.float32)
-    out = np.empty(len(weights))
-    rows = _rows_per_task(len(returns))
-
-    def work(start: int) -> None:
-        stop = min(len(weights), start + rows)
-        out[start:stop] = np.count_nonzero(weights[start:stop] @ returns_t > best, axis=1) / len(returns)
-
-    run_parallel(work, range(0, len(weights), rows), workers)
-    return out
+    counts = _count_outcomes(lambda start, stop: weights[start:stop], len(weights), returns, best, None, ("win",),
+                             np.int64, workers, None)
+    return counts["win"] / len(returns)
 
 
 def refine_weights(start_weights: np.ndarray, score: Callable[[np.ndarray], np.ndarray], min_w: float,

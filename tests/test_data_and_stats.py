@@ -30,6 +30,35 @@ def test_window_prices_drop_optional_gaps_and_reject_required_gaps(synthetic_pri
         data.window_prices(prices, OURS, [], prices.index[0])
 
 
+def test_load_prices_batches_retries_and_caches(tmp_path, monkeypatch, synthetic_prices):
+    monkeypatch.setattr(cache, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(data, "BATCH_SIZE", 4)
+    monkeypatch.setattr(data.time, "sleep", lambda _: None)
+    requests = []
+    flaky = {"S5"}  # fails on the first request only
+
+    def fake_batch(tickers, start):
+        requests.append((list(tickers), start))
+        frame = synthetic_prices.loc[start:, [t for t in tickers if t in synthetic_prices]].copy()
+        for ticker in tickers:
+            if ticker in flaky or ticker not in synthetic_prices:
+                frame[ticker] = np.nan
+                flaky.discard(ticker)
+        return frame.reindex(columns=tickers)
+
+    monkeypatch.setattr(data, "_download_batch", fake_batch)
+    tickers = OURS + ["NOPE"]
+    prices = data.load_prices(tickers, start="2020-01-01")
+    assert [len(batch) for batch, _ in requests[:3]] == [4, 4, 3]
+    assert all(start == "2020-01-01" for _, start in requests)
+    assert sorted(requests[3][0]) == ["NOPE", "S5"]  # one retry for tickers without data
+    assert bool(prices["S5"].notna().to_numpy().all()) and "NOPE" in prices.columns
+    assert prices.index[0] >= pd.Timestamp("2020-01-01")
+    calls_before = len(requests)
+    again = data.load_prices(OURS[:3], start="2020-01-01")
+    assert len(requests) == calls_before and list(again.columns) == OURS[:3]
+
+
 def test_cached_results_are_reused(tmp_path, monkeypatch):
     monkeypatch.setattr(cache, "DATA_DIR", tmp_path)
     calls = []

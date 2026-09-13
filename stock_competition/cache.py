@@ -4,11 +4,18 @@ import hashlib
 import json
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from .paths import DATA_DIR
+
+
+def cache_path(filename: str) -> Path:
+    """Path of a file in the cache folder (created if needed)."""
+    DATA_DIR.mkdir(exist_ok=True)
+    return DATA_DIR / filename
 
 
 def cache_key(**params) -> str:
@@ -17,10 +24,17 @@ def cache_key(**params) -> str:
     return hashlib.sha1(blob.encode()).hexdigest()[:12]
 
 
+def read_frame(path: Path) -> pd.DataFrame:
+    """Load a pickled DataFrame."""
+    stored = pd.read_pickle(path)
+    if not isinstance(stored, pd.DataFrame):
+        raise TypeError(f"{path.name} does not contain a DataFrame")
+    return stored
+
+
 def cached_npz(name: str, key: str, compute: Callable[..., dict], *args, **kwargs) -> dict[str, np.ndarray]:
     """Return ``data/<name>_<key>.npz`` if it exists; otherwise run ``compute(*args, **kwargs)`` and save it."""
-    DATA_DIR.mkdir(exist_ok=True)
-    path = DATA_DIR / f"{name}_{key}.npz"
+    path = cache_path(f"{name}_{key}.npz")
     if path.exists():
         print(f"  loaded cached results ({path.name})")
         with np.load(path) as stored:
@@ -32,14 +46,10 @@ def cached_npz(name: str, key: str, compute: Callable[..., dict], *args, **kwarg
 
 def cached_frame(name: str, key: str, compute: Callable[..., pd.DataFrame], *args, **kwargs) -> pd.DataFrame:
     """Return ``data/<name>_<key>.pkl`` if it exists; otherwise run ``compute(*args, **kwargs)`` and save it."""
-    DATA_DIR.mkdir(exist_ok=True)
-    path = DATA_DIR / f"{name}_{key}.pkl"
+    path = cache_path(f"{name}_{key}.pkl")
     if path.exists():
         print(f"  loaded cached results ({path.name})")
-        stored = pd.read_pickle(path)
-        if not isinstance(stored, pd.DataFrame):
-            raise TypeError(f"{path.name} does not contain a DataFrame")
-        return stored
+        return read_frame(path)
     result = compute(*args, **kwargs)
     result.to_pickle(path)
     return result

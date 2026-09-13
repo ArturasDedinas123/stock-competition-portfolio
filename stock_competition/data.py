@@ -7,49 +7,73 @@ from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import yfinance as yf
 
-from .cache import prune_cache
-from .paths import DATA_DIR
+from .cache import cache_path, prune_cache, read_frame
 
 # yfinance logs transient HTTP errors it recovers from; keep notebook output readable.
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+
+BATCH_SIZE = 100  # tickers per download request
 
 
 def _today() -> str:
     return pd.Timestamp.today().strftime("%Y-%m-%d")
 
 
-def _download_closes(tickers: list[str]) -> pd.DataFrame:
-    raw = yf.download(tickers, period="max", auto_adjust=True, progress=False, threads=True)
-    if raw is None:
-        raise RuntimeError(f"Yahoo Finance returned no data for {tickers}")
+def _download_batch(tickers: list[str], start: str | None) -> pd.DataFrame:
+    """Adjusted closes for one request; tickers that fail come back as all-NaN columns."""
+    if start:
+        raw = yf.download(tickers, start=start, auto_adjust=True, progress=False, threads=True)
+    else:
+        raw = yf.download(tickers, period="max", auto_adjust=True, progress=False, threads=True)
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=tickers, dtype=float)
     closes = raw["Close"]
     if isinstance(closes, pd.Series):
         closes = closes.to_frame(tickers[0])
     closes = closes.reindex(columns=tickers)
     closes.index = pd.DatetimeIndex(closes.index).tz_localize(None)
-    return closes.sort_index()
+    return closes
 
 
-def load_prices(tickers, refresh: bool = False) -> pd.DataFrame:
-    """Daily adjusted closes (splits and dividends included) over each ticker's full history.
+def _download_in_batches(tickers: list[str], start: str | None) -> pd.DataFrame:
+    return pd.concat([_download_batch(tickers[i:i + BATCH_SIZE], start)
+                      for i in range(0, len(tickers), BATCH_SIZE)], axis=1)
 
-    Results are cached in ``data/prices_<date>.csv``. Tickers that fail to download come back as
-    all-NaN columns. Cache files older than a few days are deleted when a new day's file is created.
+
+def _download_closes(tickers: list[str], start: str | None) -> pd.DataFrame:
+    """Adjusted closes in batches of ``BATCH_SIZE``; tickers with no data get one more try."""
+    closes = _download_in_batches(tickers, start)
+    empty = closes.reindex(columns=tickers).isna().all(axis=0).to_numpy()
+    failed = [t for t, no_data in zip(tickers, empty) if no_data]
+    if failed:
+        time.sleep(2)
+        closes = closes.drop(columns=failed).join(_download_in_batches(failed, start), how="outer")
+    return closes.reindex(columns=tickers).sort_index()
+
+
+def load_prices(tickers, start: str | None = None, refresh: bool = False) -> pd.DataFrame:
+    """Daily adjusted closes (splits and dividends included).
+
+    Args:
+        tickers: Ticker symbols.
+        start: First date to download (``"YYYY-MM-DD"``); None downloads each ticker's full history.
+        refresh: Download again even if today's cache already has the tickers.
+
+    Results are cached per day and start date in ``data/``. Tickers that fail to download come back
+    as all-NaN columns. Cache files older than a few days are deleted when a new day's file is created.
     """
-    DATA_DIR.mkdir(exist_ok=True)
     tickers = list(dict.fromkeys(tickers))
-    path = DATA_DIR / f"prices_{_today()}.csv"
+    path = cache_path(f"prices_{_today()}_{start or 'max'}.pkl")
     if not path.exists():
         prune_cache()
-    cached = pd.read_csv(path, index_col=0, parse_dates=True) if path.exists() else pd.DataFrame()
+    cached = read_frame(path) if path.exists() else pd.DataFrame()
     wanted = tickers if refresh else [t for t in tickers if t not in cached.columns]
     if wanted:
-        fresh = _download_closes(wanted)
+        fresh = _download_closes(wanted, start)
         if len(cached.columns):
-            cached = cached.drop(columns=wanted, errors="ignore").join(fresh, how="outer").sort_index()
-        else:
-            cached = fresh
-        cached.to_csv(path)
+            fresh = cached.drop(columns=wanted, errors="ignore").join(fresh, how="outer")
+        cached = fresh.sort_index()
+        cached.to_pickle(path)
     return cached.reindex(columns=tickers).dropna(how="all")
 
 
@@ -62,9 +86,8 @@ def _fetch_target_price(ticker: str) -> float | None:
 
 def load_analyst_targets(tickers, refresh: bool = False) -> pd.Series:
     """Mean analyst 12-month price target per ticker (NaN where unavailable), cached per day."""
-    DATA_DIR.mkdir(exist_ok=True)
     tickers = list(dict.fromkeys(tickers))
-    path = DATA_DIR / f"analyst_targets_{_today()}.csv"
+    path = cache_path(f"analyst_targets_{_today()}.csv")
     if path.exists() and not refresh:
         cached = pd.read_csv(path, index_col=0)["target_mean_price"]
         if isinstance(cached, pd.Series) and set(tickers) <= set(cached.index):
